@@ -757,7 +757,7 @@
     var menuArmedPointer = null;
 
     /* ---------------- Audio ---------------- */
-    var audioCtx = null, noiseBuffer = null, lastSoundTime = 0;
+    var audioCtx = null, noiseBuffer = null, lastSoundTime = 0, lastUnlockAttempt = 0;
     var musicStarted = false;
     var muted = CONFIG.audio.startMuted;
     try {
@@ -786,29 +786,36 @@
         noiseBuffer = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * seconds), audioCtx.sampleRate);
         var d = noiseBuffer.getChannelData(0);
         for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-        // iOS often needs an audible-graph node actually started inside the
-        // unlocking gesture (a bare resume() call isn't always enough) —
-        // a near-silent one-sample blip reliably finishes waking the
-        // hardware so the very next scheduled sound is actually heard.
+      } catch (e) { audioCtx = null; }
+    }
+
+    // iOS often needs an audible-graph node actually STARTED inside the
+    // unlocking gesture — a bare resume() call alone doesn't reliably take
+    // on the first attempt. Unlike initAudio() (which only needs to build
+    // the context/buffer once), this must be repeated on every gesture
+    // until the context is confirmed running: on iPhone this has been
+    // observed to genuinely take several taps before it sticks, and each
+    // tap only gets one shot at the "start a node this exact turn" trick,
+    // so skipping it after the first attempt just wastes the later taps.
+    function unlockAudio() {
+      if (!audioCtx) return;
+      if (audioCtx.state === 'running') return;
+      audioCtx.resume();
+      try {
         var kick = audioCtx.createBufferSource();
         kick.buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
         kick.connect(audioCtx.destination);
         kick.start(0);
-      } catch (e) { audioCtx = null; }
+      } catch (e) {}
     }
 
     // Both the ambient rustle SFX and the background track require a user
-    // gesture to start on mobile browsers; this is called from the first
-    // canvas touch AND from the mute button itself (a tap on the button is
-    // just as valid a gesture, so it can unlock+start audio on its own).
-    // resume() is called unconditionally (not gated on checking .state
-    // first) and retried on every touch, not just the first — iOS has been
-    // observed leaving the context "suspended" after a resume() call that
-    // silently didn't take, and checking state before resuming just means
-    // that stale reading skips retrying it.
+    // gesture to start on mobile browsers; this is called from every canvas
+    // touch AND from the mute button itself (a tap on the button is just as
+    // valid a gesture, so it can unlock+start audio on its own).
     function ensureAudioStarted() {
       initAudio();
-      if (audioCtx) audioCtx.resume();
+      unlockAudio();
       // bgAudio.src is empty when this mode has no background track — leave
       // it untouched rather than attempting to play a nonexistent source.
       if (!musicStarted && bgAudio.src) {
@@ -917,11 +924,15 @@
       var uv = screenToImageUV(e.clientX, e.clientY);
       handleStroke(uv.x, uv.y);
       checkStageCrossing(uv.x, uv.y);
-      // Safety net: if the pointerdown's unlock attempt didn't fully take
-      // (observed on iOS), keep retrying cheaply through the same
-      // continuous drag rather than staying silent until the next touch.
-      if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
       var now = performance.now();
+      // Safety net: if the pointerdown's unlock attempt didn't fully take
+      // (observed on iOS), keep retrying the full unlock (resume + a fresh
+      // kick node) throughout the same continuous drag, at most a few times
+      // a second, rather than staying silent until the next touch.
+      if (now - lastUnlockAttempt > 200) {
+        unlockAudio();
+        lastUnlockAttempt = now;
+      }
       if (now - lastSoundTime > 85) {
         playRustle();
         lastSoundTime = now;
