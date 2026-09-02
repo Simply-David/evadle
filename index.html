@@ -174,10 +174,18 @@
   var CONFIG = {
     // Resolution (long edge, in px) of the internal rub (touch intensity) map.
     // Higher = finer detail on where growth appears, more memory/CPU per stamp.
-    mapResolution: 512,
+    // This whole map is re-uploaded to the GPU on every frame you're rubbing,
+    // so it's a direct per-frame bandwidth cost; it's only a soft mask, so
+    // dropping it costs almost nothing visually.
+    mapResolution: 384,
 
-    // Cap on devicePixelRatio used for the WebGL canvas (perf safety on high-DPI phones).
-    pixelRatioCap: 2,
+    // Cap on devicePixelRatio used for the WebGL canvas. THE main performance
+    // lever: the shader samples every growth layer per pixel, so cost scales
+    // directly with pixel count (a cap of 1.5 rather than 2 is ~44% less
+    // fragment work). Raise toward 2 for sharpness, lower toward 1.25 for
+    // speed. The layer images are ~1280px tall, which pairs with ~1.5 on a
+    // phone-sized screen.
+    pixelRatioCap: 1.5,
 
     brush: {
       // Brush radius as a fraction of the shorter map dimension.
@@ -242,17 +250,17 @@
       // Known photo dimensions, used to shape the desktop phone-frame
       // correctly from the moment this mode is chosen — before any of its
       // images have actually finished downloading.
-      width: 853, height: 1844
+      width: 592, height: 1280
     },
     discover: {
       layers: buildLayerList("discover", 6),
       music: "discover/bg.mp3",
-      width: 670, height: 1448
+      width: 592, height: 1280
     },
     deep: {
       layers: buildLayerList("deep", 6),
       music: "deep/bg.mp3",
-      width: 853, height: 1844
+      width: 592, height: 1280
     }
   };
 
@@ -487,15 +495,15 @@
     for (var i = 0; i < layerCount; i++) {
       lines.push("  float w" + i + " = clamp(1.0 - abs(pos - " + i.toFixed(1) + "), 0.0, 1.0);");
     }
-    // Only ever two adjacent layers have a non-zero tent weight at a given
-    // pixel, so the fetches are guarded rather than summing all N
-    // unconditionally. Most of the screen sits at t=0 (weight only on layer
-    // 0), where whole GPU wavefronts agree on the branch and skip the other
-    // N-1 texture fetches outright — a large saving with 9 or 10 layers.
-    lines.push("  vec3 col = vec3(0.0);");
-    for (var i = 0; i < layerCount; i++) {
-      lines.push("  if (w" + i + " > 0.0) col += texture2D(uLayer" + i + ", uv).rgb * w" + i + ";");
-    }
+    // Deliberately an unconditional sum, NOT guarded by each weight. Wrapping
+    // texture fetches in non-uniform branches looked like an easy win (only
+    // two layers ever have weight) but measured far SLOWER on device: the
+    // driver can no longer issue the fetches up front to hide memory latency,
+    // and divergent branches on mobile tile GPUs cost more than the fetches
+    // they skip. Straight-line sampling is what this hardware wants.
+    var sumTerms = [];
+    for (var i = 0; i < layerCount; i++) sumTerms.push("texture2D(uLayer" + i + ", uv).rgb * w" + i);
+    lines.push("  vec3 col = " + sumTerms.join("\n           + ") + ";");
     lines.push("  gl_FragColor = vec4(col, 1.0);");
     lines.push("}");
     return lines.join("\n");
