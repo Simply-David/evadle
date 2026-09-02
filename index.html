@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0c09">
+<title>Reclaim</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0a0c09; overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    display: flex; align-items: center; justify-content: center;
+  }
+  /* On a real touch device #stage simply fills the screen (unchanged
+     full-bleed behavior). On a desktop/mouse browser (detected by input
+     capability, not screen width, so it can never misfire on an actual
+     phone) it's instead capped to a phone-shaped, phone-sized box so the
+     two match — see the (hover:hover) override below. */
+  #stage {
+    /* Default (pre-mode-selection) shape for the menu; swapped by JS via
+       setProperty to match whichever mode's photos are actually loaded. */
+    --phone-ratio: 0.46258;
+    position: relative; width: 100%; height: 100%;
+    overflow: hidden;
+    touch-action: none;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    #stage {
+      /* Letterbox to the current mode's photo aspect ratio, capped so it
+         reads as phone-sized rather than filling a tall monitor. */
+      width: min(100vw, calc(100vh * var(--phone-ratio)), 430px);
+      height: min(100vh, calc(100vw / var(--phone-ratio)), 932px);
+      border-radius: 28px;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 40px 100px rgba(0,0,0,0.55);
+    }
+  }
+  #menu {
+    position: absolute; inset: 0; z-index: 40;
+    background: #0a0c09;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3vh;
+    transition: opacity .5s ease;
+  }
+  #menu.hidden { opacity: 0; pointer-events: none; }
+  #menu .menu-title {
+    color: #8fa08a; font: 400 12px/1.4 -apple-system, system-ui, sans-serif;
+    letter-spacing: .32em; text-transform: uppercase;
+  }
+  .mode-card {
+    /* Sized off available height (not width) so three cards always fit a
+       phone-height viewport without scrolling — width then follows from
+       the aspect ratio, capped so cards don't balloon on a wide/short
+       desktop frame. */
+    position: relative; height: min(22vh, 200px); width: auto;
+    aspect-ratio: 3 / 4; max-width: 80vw;
+    border-radius: 16px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: #111; padding: 0; margin: 0; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  .mode-card img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    opacity: .82; transition: opacity .3s ease, transform .3s ease;
+  }
+  .mode-card:active img { opacity: 1; transform: scale(1.03); }
+  .mode-card span {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 0 14px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.8));
+    color: #eef2ee; font: 400 13px/1 -apple-system, system-ui, sans-serif;
+    letter-spacing: .26em; text-transform: uppercase; text-align: center;
+  }
+  #gl {
+    display: block; width: 100%; height: 100%; touch-action: none;
+  }
+  #loading {
+    position: absolute; inset: 0; background: #0a0c09; color: #8fa08a;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px;
+    font: 400 12px/1.4 -apple-system, system-ui, sans-serif;
+    letter-spacing: .18em; text-transform: uppercase;
+    transition: opacity .8s ease;
+    pointer-events: none;
+    z-index: 30;
+  }
+  #loading.hidden { opacity: 0; }
+  #loadTrack {
+    width: 140px; height: 3px; border-radius: 2px;
+    background: rgba(255,255,255,0.14); overflow: hidden;
+  }
+  #loadFill {
+    height: 100%; width: 0%; background: #8fa08a;
+    transition: width .2s ease;
+  }
+  #err {
+    position: absolute; inset: 0; background: #140b0b; color: #e0b0a8;
+    display: none; align-items: center; justify-content: center;
+    font: 400 13px/1.5 -apple-system, system-ui, sans-serif;
+    padding: 24px; text-align: center; box-sizing: border-box; white-space: pre-wrap;
+    z-index: 30;
+  }
+  #muteBtn {
+    position: absolute;
+    top: max(14px, env(safe-area-inset-top));
+    right: max(14px, env(safe-area-inset-right));
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(10,12,9,0.4);
+    border: 1px solid rgba(255,255,255,0.14);
+    display: flex; align-items: center; justify-content: center;
+    color: #dfe6df;
+    padding: 0; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    z-index: 20;
+    opacity: 0;
+    transition: opacity .6s ease;
+  }
+  #muteBtn.ready { opacity: 1; }
+  #muteBtn svg { width: 18px; height: 18px; display: block; }
+  #muteBtn .icon-off { display: none; }
+  #muteBtn.muted .icon-on { display: none; }
+  #muteBtn.muted .icon-off { display: block; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <div id="menu">
+    <div class="menu-title">choose a scene</div>
+    <button class="mode-card" data-mode="reclaim" type="button">
+      <img src="reclaim/thumb.jpg" alt="">
+      <span>Reclaim</span>
+    </button>
+    <button class="mode-card" data-mode="discover" type="button">
+      <img src="discover/thumb.jpg" alt="">
+      <span>Discover</span>
+    </button>
+    <button class="mode-card" data-mode="deep" type="button">
+      <img src="deep/thumb.jpg" alt="">
+      <span>Deep</span>
+    </button>
+  </div>
+  <button id="muteBtn" type="button" aria-label="Mute sound">
+    <svg class="icon-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9v6h4l5 5V4L8 9H4z" fill="currentColor" stroke="none"/>
+      <path d="M16.5 8.5a5 5 0 010 7"/>
+      <path d="M19.3 5.7a9 9 0 010 12.6"/>
+    </svg>
+    <svg class="icon-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9v6h4l5 5V4L8 9H4z" fill="currentColor" stroke="none"/>
+      <path d="M16 9l5 6M21 9l-5 6"/>
+    </svg>
+  </button>
+  <div id="loading" class="hidden" style="display:none">
+    <div>awakening…</div>
+    <div id="loadTrack"><div id="loadFill"></div></div>
+  </div>
+  <div id="err"></div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  /* =========================================================================
+     CONFIGURATION — tune the whole feel of the piece from here.
+     ========================================================================= */
+  var CONFIG = {
+    // Resolution (long edge, in px) of the internal rub (touch intensity) map.
+    // Higher = finer detail on where growth appears, more memory/CPU per stamp.
+    mapResolution: 512,
+
+    // Cap on devicePixelRatio used for the WebGL canvas (perf safety on high-DPI phones).
+    pixelRatioCap: 2,
+
+    brush: {
+      // Brush radius as a fraction of the shorter map dimension.
+      radius: 0.09,
+      // Spacing between interpolated stamps while dragging, as a fraction of radius.
+      // Smaller = smoother strokes, more stamps (more CPU).
+      stampSpacing: 0.4,
+      // Peak alpha (0..1) added to the rub map per stamp at the brush core.
+      // This is the single most important "feel" knob:
+      //   - lower it -> a single pass barely nudges the blend toward layer 1
+      //   - raise it -> growth builds up faster per pass
+      gainPerStamp: 0.012,
+      // How many soft irregular "lobes" make up one stamp (breaks circular symmetry).
+      lobeCount: 3,
+      // How far (fraction of radius) secondary lobes can drift from the brush center.
+      lobeJitter: 0.4,
+      haptics: true,
+      sound: true
+    },
+
+    audio: {
+      enabled: true,
+      // Volume (0..1) of the short procedural rubbing/rustling bursts.
+      rustleVolume: 0.05,
+      // Volume (0..1) of the looping background music track.
+      musicVolume: 0.35,
+      // Start muted until the user explicitly unmutes.
+      startMuted: false
+    },
+
+    // Hidden developer reset: long-press the bottom-right corner for holdMs.
+    devReset: {
+      cornerSize: 84,
+      holdMs: 1200
+    },
+
+    // Hidden: long-press the top-left corner to back out to the main menu.
+    devMenu: {
+      cornerSize: 84,
+      holdMs: 1200
+    }
+  };
+
+  /* =========================================================================
+     MODES — each is the same rub-to-reveal experience over a different
+     stack of pixel-aligned photographs (bare/quiet -> fully transformed)
+     plus its own looping background track. Picking one on the main menu
+     kicks off loading for that mode only; nothing for the other mode is
+     ever fetched.
+     ========================================================================= */
+  // Each mode's assets live entirely under its own folder: N.jpg layers,
+  // bg.mp3, and thumb.jpg for the menu card — nothing shared between modes.
+  function buildLayerList(folder, count) {
+    var list = [];
+    for (var i = 1; i <= count; i++) list.push(folder + "/" + i + ".jpg");
+    return list;
+  }
+  var MODES = {
+    reclaim: {
+      layers: buildLayerList("reclaim", 9),
+      music: "reclaim/bg.mp3",
+      // Known photo dimensions, used to shape the desktop phone-frame
+      // correctly from the moment this mode is chosen — before any of its
+      // images have actually finished downloading.
+      width: 853, height: 1844
+    },
+    discover: {
+      layers: buildLayerList("discover", 6),
+      music: "discover/bg.mp3",
+      width: 670, height: 1448
+    },
+    deep: {
+      layers: buildLayerList("deep", 6),
+      music: "deep/bg.mp3",
+      width: 853, height: 1844
+    }
+  };
+
+  /* =========================================================================
+     BOOTSTRAP — every asset for the CHOSEN mode (its growth-layer images
+     plus its background track) must be fully downloaded and decoded before
+     the piece appears. Assets are fetched with a streaming reader rather
+     than plain Image()/Audio() loading so real byte-level download progress
+     is visible — the whole point of the loading bar — instead of jumping
+     straight from 0% to 100% the instant a single monolithic payload
+     finishes. Nothing is fetched until a mode is picked on the main menu.
+     ========================================================================= */
+  var stageEl = document.getElementById('stage');
+  var menuEl = document.getElementById('menu');
+  var loadingEl = document.getElementById('loading');
+  var loadFillEl = document.getElementById('loadFill');
+  var errEl = document.getElementById('err');
+  var canvas = document.getElementById('gl');
+  var muteBtn = document.getElementById('muteBtn');
+
+  function fail(msg) {
+    errEl.textContent = msg;
+    errEl.style.display = 'flex';
+    loadingEl.classList.add('hidden');
+    console.error(msg);
+  }
+
+  var gl = canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: false })
+        || canvas.getContext('experimental-webgl', { antialias: true, alpha: false });
+
+  if (!gl) {
+    fail("This browser doesn't support WebGL, which this piece needs to run.");
+  }
+
+  function beginLoading(mode) {
+    if (!gl) return;
+    var layerSources = mode.layers;
+    var musicSrc = mode.music;
+    var layerCount = layerSources.length;
+
+    var maxTexUnits = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS);
+    if (maxTexUnits < layerCount + 1) {
+      fail("This device's graphics driver doesn't support enough texture units for this piece.");
+      return;
+    }
+
+    // Shape the desktop phone-frame to this mode's photos immediately,
+    // before any of them have actually finished downloading.
+    stageEl.style.setProperty('--phone-ratio', (mode.width / mode.height).toString());
+
+    menuEl.classList.add('hidden');
+    loadingEl.style.display = 'flex';
+    loadingEl.classList.remove('hidden');
+    loadFillEl.style.width = '0%';
+
+    // Total bytes are pinned down with a quick HEAD pre-pass (tiny, no
+    // response bodies) BEFORE any real downloading starts, so the progress
+    // denominator is fixed from the first frame — otherwise, if a later
+    // asset's Content-Length only becomes known after earlier ones have
+    // already reported bytes against a smaller total, the bar can visibly
+    // jump backwards when the denominator suddenly grows.
+    var allSources = musicSrc ? layerSources.concat([musicSrc]) : layerSources.slice();
+    var knownLengths = {};
+    var bytesExpected = 0;
+    var bytesReceived = 0;
+    function updateBar() {
+      var pct = bytesExpected > 0 ? Math.min(100, (bytesReceived / bytesExpected) * 100) : 0;
+      loadFillEl.style.width = pct.toFixed(1) + '%';
+    }
+
+    function fetchWithProgress(url) {
+      return fetch(url).then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + url);
+        var reader = resp.body.getReader();
+        var chunks = [];
+        function pump() {
+          return reader.read().then(function (result) {
+            if (result.done) {
+              return new Blob(chunks, { type: resp.headers.get('content-type') || undefined });
+            }
+            chunks.push(result.value);
+            bytesReceived += result.value.length;
+            updateBar();
+            return pump();
+          });
+        }
+        return pump();
+      });
+    }
+
+    var loadedImages = new Array(layerCount);
+    var loadedCount = 0;
+    var audioReady = false;
+    var failed = false;
+    var bgAudio = new Audio();
+    bgAudio.loop = true;
+
+    function maybeInit() {
+      if (loadedCount === layerCount && audioReady && !failed) init(loadedImages, bgAudio);
+    }
+
+    // Decoded via a plain Image element (not createImageBitmap) sourced from
+    // a blob: URL — WebGL's UNPACK_FLIP_Y_WEBGL doesn't reliably apply to
+    // ImageBitmap sources in this browser (confirmed by A/B testing: both
+    // true and false produced the same upside-down result), whereas
+    // HTMLImageElement + flip=true is the already-proven-correct path.
+    function loadImageFromBlob(blob) {
+      return new Promise(function (resolve, reject) {
+        var img = new Image();
+        img.onload = function () { resolve(img); };
+        img.onerror = function () { reject(new Error('image decode failed')); };
+        img.src = URL.createObjectURL(blob);
+      });
+    }
+
+    function startDownloads() {
+      layerSources.forEach(function (src, i) {
+        fetchWithProgress(src)
+          .then(loadImageFromBlob)
+          .then(function (img) {
+            loadedImages[i] = img;
+            loadedCount++;
+            maybeInit();
+          })
+          .catch(function (err) {
+            if (failed) return;
+            failed = true;
+            fail("Could not load growth layer " + (i + 1) + ".");
+            console.error(err);
+          });
+      });
+
+      if (!musicSrc) {
+        // This mode has no background track — proceed without one rather
+        // than waiting on an asset that was never going to arrive.
+        audioReady = true;
+        maybeInit();
+        return;
+      }
+      fetchWithProgress(musicSrc)
+        .then(function (blob) {
+          bgAudio.src = URL.createObjectURL(blob);
+          audioReady = true;
+          maybeInit();
+        })
+        .catch(function (err) {
+          console.warn('[reclaim] background music failed to load; continuing without it.', err);
+          audioReady = true;
+          maybeInit();
+        });
+    }
+
+    Promise.all(allSources.map(function (url) {
+      return fetch(url, { method: 'HEAD' }).then(function (resp) {
+        knownLengths[url] = parseInt(resp.headers.get('content-length') || '0', 10);
+      }).catch(function () {
+        knownLengths[url] = 0;
+      });
+    })).then(function () {
+      // Fall back to a flat estimate for any asset whose length couldn't be
+      // determined, so a single missing header can't stall the whole bar.
+      var FALLBACK_BYTES = 1000000;
+      bytesExpected = allSources.reduce(function (sum, url) {
+        return sum + (knownLengths[url] || FALLBACK_BYTES);
+      }, 0);
+      updateBar();
+      startDownloads();
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.mode-card'), function (card) {
+    card.addEventListener('click', function () {
+      var mode = MODES[card.getAttribute('data-mode')];
+      if (mode) beginLoading(mode);
+    });
+  });
+
+  /* =========================================================================
+     SHADERS
+     ========================================================================= */
+  var VERT_SRC = [
+    "attribute vec2 a_pos;",
+    "varying vec2 v_uv;",
+    "void main() {",
+    "  v_uv = a_pos * 0.5 + 0.5;",
+    "  gl_Position = vec4(a_pos, 0.0, 1.0);",
+    "}"
+  ].join("\n");
+
+  // The N real photographs are blended with a piecewise-linear "tent" weight
+  // per layer, keyed off the rub intensity — no dynamic sampler indexing
+  // (unsupported in GLSL ES 1.00), just N texture fetches and a weighted
+  // sum whose weights always sum to 1. Built programmatically so the layer
+  // count can change without hand-editing GLSL.
+  function buildFragSrc(layerCount) {
+    var lines = [
+      "precision highp float;",
+      "varying vec2 v_uv;"
+    ];
+    for (var i = 0; i < layerCount; i++) lines.push("uniform sampler2D uLayer" + i + ";");
+    lines.push(
+      "uniform sampler2D uRub;",
+      "uniform vec2 uScreenSize;",
+      "uniform vec2 uImageSize;",
+
+      "vec2 coverUV(vec2 screenUV) {",
+      "  float screenRatio = uScreenSize.x / uScreenSize.y;",
+      "  float imageRatio = uImageSize.x / uImageSize.y;",
+      "  vec2 uv = screenUV;",
+      "  if (screenRatio > imageRatio) {",
+      "    float scale = imageRatio / screenRatio;",
+      "    uv.y = (screenUV.y - 0.5) * scale + 0.5;",
+      "  } else {",
+      "    float scale = screenRatio / imageRatio;",
+      "    uv.x = (screenUV.x - 0.5) * scale + 0.5;",
+      "  }",
+      "  return uv;",
+      "}",
+
+      "void main() {",
+      "  vec2 uv = coverUV(v_uv);",
+      "  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {",
+      "    gl_FragColor = vec4(0.0,0.0,0.0,1.0); return;",
+      "  }",
+      "  float t = clamp(texture2D(uRub, uv).r, 0.0, 1.0);",
+      "  float pos = t * " + (layerCount - 1).toFixed(1) + ";"
+    );
+    for (var i = 0; i < layerCount; i++) {
+      lines.push("  float w" + i + " = clamp(1.0 - abs(pos - " + i.toFixed(1) + "), 0.0, 1.0);");
+    }
+    var sumTerms = [];
+    for (var i = 0; i < layerCount; i++) sumTerms.push("texture2D(uLayer" + i + ", uv).rgb * w" + i);
+    lines.push("  vec3 col = " + sumTerms.join("\n           + ") + ";");
+    lines.push("  gl_FragColor = vec4(col, 1.0);");
+    lines.push("}");
+    return lines.join("\n");
+  }
+  function compileShader(gl, type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      var log = gl.getShaderInfoLog(s);
+      gl.deleteShader(s);
+      throw new Error("Shader compile error: " + log);
+    }
+    return s;
+  }
+
+  function createProgram(gl, vsrc, fsrc) {
+    var vs = compileShader(gl, gl.VERTEX_SHADER, vsrc);
+    var fs = compileShader(gl, gl.FRAGMENT_SHADER, fsrc);
+    var p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      var log = gl.getProgramInfoLog(p);
+      throw new Error("Program link error: " + log);
+    }
+    return p;
+  }
+
+  function createTexture(gl) {
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  /* =========================================================================
+     MAIN
+     ========================================================================= */
+  function init(images, bgAudio) {
+    var layerCount = images.length;
+    var FRAG_SRC = buildFragSrc(layerCount);
+    var imgW = images[0].naturalWidth, imgH = images[0].naturalHeight;
+
+    // Rub (intensity) map — a persistent 2D canvas accumulating touch strokes.
+    var aspect = imgW / imgH;
+    var mapW, mapH;
+    if (aspect >= 1) { mapW = CONFIG.mapResolution; mapH = Math.round(CONFIG.mapResolution / aspect); }
+    else { mapH = CONFIG.mapResolution; mapW = Math.round(CONFIG.mapResolution * aspect); }
+
+    var rubCanvas = document.createElement('canvas');
+    rubCanvas.width = mapW; rubCanvas.height = mapH;
+    var rubCtx = rubCanvas.getContext('2d', { willReadFrequently: false });
+    rubCtx.fillStyle = 'rgba(0,0,0,1)';
+    rubCtx.fillRect(0, 0, mapW, mapH);
+    var rubDirty = true;
+
+    // Lightweight shadow grid (independent of canvas) purely for cheap stage-crossing
+    // lookups (haptics), avoiding any GPU/canvas readback on the hot path.
+    var GRID_RES = 72;
+    var gridW, gridH;
+    if (imgW >= imgH) { gridW = GRID_RES; gridH = Math.round(GRID_RES * imgH / imgW); }
+    else { gridH = GRID_RES; gridW = Math.round(GRID_RES * imgW / imgH); }
+    var rubGrid = new Float32Array(gridW * gridH);
+
+    /* ---------------- WebGL setup ---------------- */
+    var program = createProgram(gl, VERT_SRC, FRAG_SRC);
+    gl.useProgram(program);
+
+    var quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+    var aPos = gl.getAttribLocation(program, 'a_pos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    var layerTextures = images.map(function (img) {
+      var tex = createTexture(gl);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
+      return tex;
+    });
+
+    var rubTex = createTexture(gl);
+    function uploadRub() {
+      gl.activeTexture(gl.TEXTURE0 + layerCount);
+      gl.bindTexture(gl.TEXTURE_2D, rubTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, rubCanvas);
+    }
+    uploadRub();
+
+    var u = {};
+    var uniformNames = ['uRub', 'uScreenSize', 'uImageSize'];
+    for (var ni = 0; ni < layerCount; ni++) uniformNames.push('uLayer' + ni);
+    uniformNames.forEach(function (name) { u[name] = gl.getUniformLocation(program, name); });
+
+    for (var li = 0; li < layerCount; li++) gl.uniform1i(u['uLayer' + li], li);
+    gl.uniform1i(u.uRub, layerCount);
+    gl.uniform2f(u.uImageSize, imgW, imgH);
+
+    gl.clearColor(0,0,0,1);
+    gl.disable(gl.DEPTH_TEST);
+
+    /* ---------------- Resize ----------------
+       Sized off the canvas's own CSS box (canvas.clientWidth/Height), not
+       window.innerWidth/Height — on desktop that box is the letterboxed
+       phone-shaped frame (see the (hover:hover) CSS rule), not the full
+       browser window, so the shader's cover-mapping must match the frame,
+       not the window. On a real phone the frame fills the window anyway,
+       so this is a no-op behavior change there. */
+    function resize() {
+      var dpr = Math.min(window.devicePixelRatio || 1, CONFIG.pixelRatioCap);
+      var cssW = canvas.clientWidth, cssH = canvas.clientHeight;
+      var w = Math.round(cssW * dpr);
+      var h = Math.round(cssH * dpr);
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w; canvas.height = h;
+        gl.viewport(0, 0, w, h);
+        gl.uniform2f(u.uScreenSize, cssW, cssH);
+      }
+    }
+    resize();
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', function(){ setTimeout(resize, 60); });
+
+    /* ---------------- Brush stamping ---------------- */
+    function screenToImageUV(clientX, clientY) {
+      var rect = canvas.getBoundingClientRect();
+      var sx = (clientX - rect.left) / rect.width;
+      var sy = (clientY - rect.top) / rect.height;
+      var screenRatio = rect.width / rect.height;
+      var imageRatio = imgW / imgH;
+      var uv = { x: sx, y: sy };
+      if (screenRatio > imageRatio) {
+        var scaleY = imageRatio / screenRatio;
+        uv.y = (sy - 0.5) * scaleY + 0.5;
+      } else {
+        var scaleX = screenRatio / imageRatio;
+        uv.x = (sx - 0.5) * scaleX + 0.5;
+      }
+      return uv;
+    }
+
+    var mapMinDim = Math.min(mapW, mapH);
+    var brushRadiusPx = CONFIG.brush.radius * mapMinDim;
+
+    function addToGrid(u01, v01, radiusFracOfMin, gain) {
+      var gx = u01 * gridW, gy = v01 * gridH;
+      var gridMinDim = Math.min(gridW, gridH);
+      var gr = radiusFracOfMin * gridMinDim;
+      var x0 = Math.max(0, Math.floor(gx - gr)), x1 = Math.min(gridW-1, Math.ceil(gx + gr));
+      var y0 = Math.max(0, Math.floor(gy - gr)), y1 = Math.min(gridH-1, Math.ceil(gy + gr));
+      for (var yy = y0; yy <= y1; yy++) {
+        for (var xx = x0; xx <= x1; xx++) {
+          var dx = xx - gx, dy = yy - gy;
+          var d2 = dx*dx + dy*dy;
+          var falloff = Math.exp(-d2 / (2 * gr * gr * 0.3));
+          if (falloff < 0.02) continue;
+          var idx = yy * gridW + xx;
+          rubGrid[idx] = Math.min(1, rubGrid[idx] + gain * falloff);
+        }
+      }
+    }
+
+    function stampAt(u01, v01, strength) {
+      var cx = u01 * mapW, cy = v01 * mapH;
+      var r = brushRadiusPx;
+      rubCtx.globalCompositeOperation = 'lighter';
+      var lobes = CONFIG.brush.lobeCount;
+      for (var i = 0; i < lobes; i++) {
+        var isCore = i === 0;
+        var ang = Math.random() * Math.PI * 2;
+        // Every lobe (including the core) drifts a little so repeated stamps at
+        // "the same" spot don't perfectly restack into a hard-edged disc.
+        var dist = (isCore ? r * 0.15 : r * CONFIG.brush.lobeJitter) * Math.random();
+        var bx = cx + Math.cos(ang) * dist;
+        var by = cy + Math.sin(ang) * dist;
+        var br = r * (isCore ? (0.85 + Math.random() * 0.25) : (0.45 + Math.random() * 0.35));
+        var alpha = strength * (0.6 + Math.random() * 0.4) * (isCore ? 1.0 : 0.65);
+        var stretch = 0.75 + Math.random() * 0.5;
+        rubCtx.save();
+        rubCtx.translate(bx, by);
+        rubCtx.rotate(ang);
+        rubCtx.scale(1, stretch);
+        // Gradient is defined in local (post-transform) space so it lines up
+        // exactly with the arc below — do not use the pre-transform bx/by here.
+        // Multiple stops (rather than a single linear ramp) give a gentler,
+        // more organic falloff instead of a disc with a hard rim.
+        var grad = rubCtx.createRadialGradient(0, 0, 0, 0, 0, br);
+        grad.addColorStop(0.0, 'rgba(255,255,255,' + alpha.toFixed(3) + ')');
+        grad.addColorStop(0.45, 'rgba(255,255,255,' + (alpha * 0.85).toFixed(3) + ')');
+        grad.addColorStop(0.75, 'rgba(255,255,255,' + (alpha * 0.4).toFixed(3) + ')');
+        grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+        rubCtx.fillStyle = grad;
+        rubCtx.beginPath();
+        rubCtx.arc(0, 0, br, 0, Math.PI * 2);
+        rubCtx.fill();
+        rubCtx.restore();
+      }
+      rubDirty = true;
+      addToGrid(u01, v01, CONFIG.brush.radius, strength);
+    }
+
+    var lastPt = null;
+    var lastStampPt = null;
+    function handleStroke(u01, v01) {
+      if (lastPt) {
+        var dx = u01 - lastPt.x, dy = v01 - lastPt.y;
+        var distPx = Math.hypot(dx * mapW, dy * mapH);
+        var step = Math.max(1, brushRadiusPx * CONFIG.brush.stampSpacing);
+        // Gate stamping by distance actually travelled since the last stamp,
+        // not by how many pointermove events fired — otherwise a
+        // high-polling-rate device would over-stamp on tiny jitter while the
+        // finger barely moves, ramping intensity up far faster than intended.
+        var distSinceStamp = lastStampPt ? Math.hypot((u01 - lastStampPt.x) * mapW, (v01 - lastStampPt.y) * mapH) : Infinity;
+        if (distSinceStamp >= step * 0.6) {
+          var steps = Math.min(48, Math.max(1, Math.floor(distPx / step)));
+          for (var i = 1; i <= steps; i++) {
+            var tt = i / steps;
+            stampAt(lastPt.x + dx * tt, lastPt.y + dy * tt, CONFIG.brush.gainPerStamp);
+          }
+          lastStampPt = { x: u01, y: v01 };
+        }
+      } else {
+        stampAt(u01, v01, CONFIG.brush.gainPerStamp);
+        lastStampPt = { x: u01, y: v01 };
+      }
+      lastPt = { x: u01, y: v01 };
+    }
+
+    /* ---------------- Hidden dev reset ---------------- */
+    function isInResetCorner(clientX, clientY) {
+      var s = CONFIG.devReset.cornerSize;
+      var rect = canvas.getBoundingClientRect();
+      return clientX > rect.right - s && clientY > rect.bottom - s;
+    }
+    function doReset() {
+      rubCtx.clearRect(0, 0, mapW, mapH);
+      rubCtx.fillStyle = 'rgba(0,0,0,1)';
+      rubCtx.fillRect(0, 0, mapW, mapH);
+      rubGrid.fill(0);
+      rubDirty = true;
+      lastStageIdx = -1;
+      if (navigator.vibrate) navigator.vibrate([12, 40, 12]);
+      console.log('[reclaim] scene reset');
+    }
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'r' || e.key === 'R') doReset();
+    });
+    var resetTimer = null;
+    var resetArmedPointer = null;
+
+    /* ---------------- Hidden: long-press the top-left corner to back out
+       to the main menu. A full page reload is the simplest reliable way to
+       tear down this mode's WebGL/audio state before the menu reappears. */
+    function isInMenuCorner(clientX, clientY) {
+      var s = CONFIG.devMenu.cornerSize;
+      var rect = canvas.getBoundingClientRect();
+      return clientX < rect.left + s && clientY < rect.top + s;
+    }
+    var menuTimer = null;
+    var menuArmedPointer = null;
+
+    /* ---------------- Audio ---------------- */
+    var audioCtx = null, noiseBuffer = null, lastSoundTime = 0;
+    var musicStarted = false;
+    var muted = CONFIG.audio.startMuted;
+    try {
+      var savedMute = localStorage.getItem('reclaim_muted');
+      if (savedMute !== null) muted = savedMute === '1';
+    } catch (e) {}
+
+    function applyMuteState() {
+      // iOS Safari silently ignores HTMLMediaElement.volume entirely (a
+      // long-standing WebKit limitation — only .muted is respected there).
+      // Setting both keeps the intended level for browsers that do respect
+      // volume while still actually muting on iPhone.
+      bgAudio.muted = muted;
+      bgAudio.volume = CONFIG.audio.musicVolume;
+      muteBtn.classList.toggle('muted', muted);
+      muteBtn.setAttribute('aria-label', muted ? 'Unmute sound' : 'Mute sound');
+    }
+    applyMuteState();
+
+    function initAudio() {
+      if (audioCtx || !CONFIG.audio.enabled) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AC();
+        var seconds = 1.0;
+        noiseBuffer = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * seconds), audioCtx.sampleRate);
+        var d = noiseBuffer.getChannelData(0);
+        for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        // iOS often needs an audible-graph node actually started inside the
+        // unlocking gesture (a bare resume() call isn't always enough) —
+        // a near-silent one-sample blip reliably finishes waking the
+        // hardware so the very next scheduled sound is actually heard.
+        var kick = audioCtx.createBufferSource();
+        kick.buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+        kick.connect(audioCtx.destination);
+        kick.start(0);
+      } catch (e) { audioCtx = null; }
+    }
+
+    // Both the ambient rustle SFX and the background track require a user
+    // gesture to start on mobile browsers; this is called from the first
+    // canvas touch AND from the mute button itself (a tap on the button is
+    // just as valid a gesture, so it can unlock+start audio on its own).
+    // resume() is called unconditionally (not gated on checking .state
+    // first) and retried on every touch, not just the first — iOS has been
+    // observed leaving the context "suspended" after a resume() call that
+    // silently didn't take, and checking state before resuming just means
+    // that stale reading skips retrying it.
+    function ensureAudioStarted() {
+      initAudio();
+      if (audioCtx) audioCtx.resume();
+      // bgAudio.src is empty when this mode has no background track — leave
+      // it untouched rather than attempting to play a nonexistent source.
+      if (!musicStarted && bgAudio.src) {
+        musicStarted = true;
+        var p = bgAudio.play();
+        if (p && p.catch) p.catch(function () { musicStarted = false; });
+      }
+    }
+
+    function toggleMute() {
+      muted = !muted;
+      try { localStorage.setItem('reclaim_muted', muted ? '1' : '0'); } catch (e) {}
+      applyMuteState();
+      ensureAudioStarted();
+    }
+    muteBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMute();
+    });
+
+    function playRustle() {
+      if (muted || !CONFIG.brush.sound || !audioCtx || !noiseBuffer) return;
+      var now = audioCtx.currentTime;
+      var src = audioCtx.createBufferSource();
+      src.buffer = noiseBuffer;
+      var bp = audioCtx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 700 + Math.random() * 1600;
+      bp.Q.value = 0.6 + Math.random() * 0.8;
+      var g = audioCtx.createGain();
+      var dur = 0.08 + Math.random() * 0.09;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(CONFIG.audio.rustleVolume * (0.6 + Math.random() * 0.5), now + dur * 0.35);
+      g.gain.linearRampToValueAtTime(0, now + dur);
+      src.connect(bp); bp.connect(g); g.connect(audioCtx.destination);
+      src.start(now);
+      src.stop(now + dur + 0.02);
+    }
+
+    /* ---------------- Stage-crossing haptics (fires as each new layer becomes the dominant one) ---------------- */
+    var lastStageIdx = -1;
+    function stageIndexFor(v) {
+      return Math.round(v * (layerCount - 1));
+    }
+    function checkStageCrossing(u01, v01) {
+      var gx = Math.min(gridW - 1, Math.max(0, Math.round(u01 * gridW)));
+      var gy = Math.min(gridH - 1, Math.max(0, Math.round(v01 * gridH)));
+      var val = rubGrid[gy * gridW + gx];
+      var idx = stageIndexFor(val);
+      if (idx !== lastStageIdx) {
+        if (idx > lastStageIdx) {
+          if (CONFIG.brush.haptics && navigator.vibrate) navigator.vibrate(10);
+        }
+        lastStageIdx = idx;
+      }
+    }
+
+    /* ---------------- Pointer input ---------------- */
+    var activePointers = new Map();
+
+    function onPointerDown(e) {
+      if (isInResetCorner(e.clientX, e.clientY)) {
+        resetArmedPointer = e.pointerId;
+        resetTimer = setTimeout(function () {
+          doReset();
+          resetTimer = null;
+        }, CONFIG.devReset.holdMs);
+        return;
+      }
+      if (isInMenuCorner(e.clientX, e.clientY)) {
+        menuArmedPointer = e.pointerId;
+        menuTimer = setTimeout(function () {
+          if (navigator.vibrate) navigator.vibrate([12, 40, 12]);
+          location.reload();
+        }, CONFIG.devMenu.holdMs);
+        return;
+      }
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      activePointers.set(e.pointerId, true);
+      lastPt = null;
+      ensureAudioStarted();
+      var uv = screenToImageUV(e.clientX, e.clientY);
+      handleStroke(uv.x, uv.y);
+      checkStageCrossing(uv.x, uv.y);
+    }
+
+    function onPointerMove(e) {
+      if (resetArmedPointer === e.pointerId) {
+        if (!isInResetCorner(e.clientX, e.clientY)) {
+          clearTimeout(resetTimer); resetTimer = null; resetArmedPointer = null;
+        } else {
+          return;
+        }
+      }
+      if (menuArmedPointer === e.pointerId) {
+        if (!isInMenuCorner(e.clientX, e.clientY)) {
+          clearTimeout(menuTimer); menuTimer = null; menuArmedPointer = null;
+        } else {
+          return;
+        }
+      }
+      if (!activePointers.has(e.pointerId)) return;
+      e.preventDefault();
+      var uv = screenToImageUV(e.clientX, e.clientY);
+      handleStroke(uv.x, uv.y);
+      checkStageCrossing(uv.x, uv.y);
+      // Safety net: if the pointerdown's unlock attempt didn't fully take
+      // (observed on iOS), keep retrying cheaply through the same
+      // continuous drag rather than staying silent until the next touch.
+      if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
+      var now = performance.now();
+      if (now - lastSoundTime > 85) {
+        playRustle();
+        lastSoundTime = now;
+      }
+    }
+
+    function onPointerUp(e) {
+      if (resetArmedPointer === e.pointerId) {
+        clearTimeout(resetTimer); resetTimer = null; resetArmedPointer = null;
+      }
+      if (menuArmedPointer === e.pointerId) {
+        clearTimeout(menuTimer); menuTimer = null; menuArmedPointer = null;
+      }
+      activePointers.delete(e.pointerId);
+      lastPt = null;
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
+    canvas.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onPointerUp, { passive: false });
+    window.addEventListener('pointercancel', onPointerUp, { passive: false });
+    document.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+    document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+    document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+    /* ---------------- Render loop ---------------- */
+    function frame() {
+      if (rubDirty) { uploadRub(); rubDirty = false; }
+      for (var i = 0; i < layerCount; i++) {
+        gl.activeTexture(gl.TEXTURE0 + i);
+        gl.bindTexture(gl.TEXTURE_2D, layerTextures[i]);
+      }
+      gl.activeTexture(gl.TEXTURE0 + layerCount);
+      gl.bindTexture(gl.TEXTURE_2D, rubTex);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    loadingEl.classList.add('hidden');
+    setTimeout(function () { loadingEl.style.display = 'none'; }, 900);
+    muteBtn.classList.add('ready');
+
+    // Best-effort autoplay for browsers that allow it (some desktop
+    // sessions do); silently falls back to starting on first touch/mute-tap
+    // wherever the platform requires an explicit gesture first.
+    ensureAudioStarted();
+
+    // Expose for debugging / tuning from a console.
+    window.__reclaim = {
+      CONFIG: CONFIG, reset: doReset, rubGrid: rubGrid, gl: gl,
+      rubCanvas: rubCanvas, mapW: mapW, mapH: mapH, gridW: gridW, gridH: gridH,
+      screenToImageUV: screenToImageUV, bgAudio: bgAudio,
+      toggleMute: toggleMute, isMuted: function () { return muted; }
+    };
+  }
+})();
+</script>
+</body>
+</html>
