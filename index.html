@@ -280,8 +280,12 @@
     console.error(msg);
   }
 
-  var gl = canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: false })
-        || canvas.getContext('experimental-webgl', { antialias: true, alpha: false });
+  // antialias is off deliberately: the scene is a single fullscreen quad, so
+  // there are no polygon edges for MSAA to smooth — it would only cost the
+  // extra multisample buffer and its resolve, which is expensive bandwidth on
+  // mobile tile-based GPUs (and Safari on iPhone felt it).
+  var gl = canvas.getContext('webgl', { antialias: false, alpha: false, preserveDrawingBuffer: false })
+        || canvas.getContext('experimental-webgl', { antialias: false, alpha: false });
 
   if (!gl) {
     fail("This browser doesn't support WebGL, which this piece needs to run.");
@@ -483,9 +487,15 @@
     for (var i = 0; i < layerCount; i++) {
       lines.push("  float w" + i + " = clamp(1.0 - abs(pos - " + i.toFixed(1) + "), 0.0, 1.0);");
     }
-    var sumTerms = [];
-    for (var i = 0; i < layerCount; i++) sumTerms.push("texture2D(uLayer" + i + ", uv).rgb * w" + i);
-    lines.push("  vec3 col = " + sumTerms.join("\n           + ") + ";");
+    // Only ever two adjacent layers have a non-zero tent weight at a given
+    // pixel, so the fetches are guarded rather than summing all N
+    // unconditionally. Most of the screen sits at t=0 (weight only on layer
+    // 0), where whole GPU wavefronts agree on the branch and skip the other
+    // N-1 texture fetches outright — a large saving with 9 or 10 layers.
+    lines.push("  vec3 col = vec3(0.0);");
+    for (var i = 0; i < layerCount; i++) {
+      lines.push("  if (w" + i + " > 0.0) col += texture2D(uLayer" + i + ", uv).rgb * w" + i + ";");
+    }
     lines.push("  gl_FragColor = vec4(col, 1.0);");
     lines.push("}");
     return lines.join("\n");
@@ -546,6 +556,7 @@
     rubCtx.fillStyle = 'rgba(0,0,0,1)';
     rubCtx.fillRect(0, 0, mapW, mapH);
     var rubDirty = true;
+    var needsDraw = true;
 
     // Lightweight shadow grid (independent of canvas) purely for cheap stage-crossing
     // lookups (haptics), avoiding any GPU/canvas readback on the hot path.
@@ -612,6 +623,7 @@
         canvas.width = w; canvas.height = h;
         gl.viewport(0, 0, w, h);
         gl.uniform2f(u.uScreenSize, cssW, cssH);
+        needsDraw = true;
       }
     }
     resize();
@@ -796,29 +808,44 @@
     ];
     // A handful of pooled elements per clip so quick repeated triggers
     // overlap naturally instead of a single element cutting itself off.
-    var rustlePool = [];
-    RUSTLE_SOURCES.forEach(function (src) {
-      for (var i = 0; i < 2; i++) {
-        var a = new Audio(src);
-        a.preload = 'auto';
-        a.volume = CONFIG.audio.rustleVolume; // honored on desktop/Android; iOS ignores this, hence the quiet bake
-        rustlePool.push(a);
-      }
+    // One element per clip. Three is enough to overlap (bursts are ~0.1s and
+    // throttled to 85ms apart) while keeping the number of elements that
+    // need individually unlocking as low as possible.
+    var rustlePool = RUSTLE_SOURCES.map(function (src) {
+      var a = new Audio(src);
+      a.preload = 'auto';
+      a.volume = CONFIG.audio.rustleVolume; // honored on desktop/Android; iOS ignores this, hence the quiet bake
+      return a;
     });
     var rustlePoolIndex = 0;
     applyMuteState();
 
-    // Deliberately no separate "warm up/unlock" step here — an earlier
-    // version tried to pre-unlock the whole pool with a play()-then-
-    // immediate-pause() trick, which is a known way to get the play()
-    // promise rejected even during a genuine gesture (pausing before it
-    // resolves reads as interrupting it), and a bug in that version marked
-    // the pool "warmed" before confirming success, permanently blocking
-    // retries the moment one non-gesture attempt failed. Simplest fix:
-    // just call .play() directly from the real gesture handlers below
-    // (pointerdown/pointermove during an active touch, and the mute
-    // button's click) and swallow failures — each is naturally retried
-    // next time, nothing gets permanently stuck.
+    // THE iOS GOTCHA THIS WHOLE SYSTEM EXISTS AROUND:
+    // Per spec, only keydown/mousedown/pointerdown/pointerup/touchend grant
+    // "user activation" — pointermove does NOT, and WebKit enforces that far
+    // more strictly than Chrome. Rustle bursts are triggered from
+    // pointermove (while dragging), so their play() calls can never rely on
+    // being inside a gesture. And each <audio> element must be individually
+    // unlocked by a play() during a real gesture — unlocking one does not
+    // unlock its siblings. Hence: unlock every pooled element from the
+    // handlers that DO grant activation (pointerdown / pointerup / the mute
+    // button's click). To keep that inaudible, each element is seeked to the
+    // last few ms of its own fade-out tail before playing, so a real,
+    // uninterrupted play() happens without anything being heard.
+    var rustleUnlocked = false;
+    function unlockRustlePool() {
+      if (rustleUnlocked) return;
+      var allReady = true;
+      rustlePool.forEach(function (a) {
+        // Needs metadata for the tail seek; if it isn't ready yet, leave the
+        // flag clear so the next gesture retries rather than half-unlocking.
+        if (!a.duration || !isFinite(a.duration)) { allReady = false; return; }
+        try { a.currentTime = Math.max(0, a.duration - 0.005); } catch (e) { allReady = false; return; }
+        var p = a.play();
+        if (p && p.catch) p.catch(function () { rustleUnlocked = false; });
+      });
+      if (allReady) rustleUnlocked = true;
+    }
     function ensureAudioStarted() {
       // bgAudio.src is empty when this mode has no background track — leave
       // it untouched rather than attempting to play a nonexistent source.
@@ -834,6 +861,7 @@
       try { localStorage.setItem('reclaim_muted', muted ? '1' : '0'); } catch (e) {}
       applyMuteState();
       ensureAudioStarted();
+      unlockRustlePool(); // a click grants activation — take the opportunity
     }
     muteBtn.addEventListener('click', function (e) {
       e.preventDefault();
@@ -894,6 +922,7 @@
       activePointers.set(e.pointerId, true);
       lastPt = null;
       ensureAudioStarted();
+      unlockRustlePool(); // pointerdown grants activation; pointermove won't
       var uv = screenToImageUV(e.clientX, e.clientY);
       handleStroke(uv.x, uv.y);
       checkStageCrossing(uv.x, uv.y);
@@ -933,6 +962,9 @@
       if (menuArmedPointer === e.pointerId) {
         clearTimeout(menuTimer); menuTimer = null; menuArmedPointer = null;
       }
+      // pointerup also grants activation — retry here in case metadata
+      // wasn't loaded yet when pointerdown fired.
+      unlockRustlePool();
       activePointers.delete(e.pointerId);
       lastPt = null;
     }
@@ -946,15 +978,24 @@
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
     /* ---------------- Render loop ---------------- */
+    // Render on demand. Nothing in the scene animates on its own — it only
+    // changes while a finger is actually moving — so redrawing every frame
+    // was burning GPU time (and battery, and heat, which throttles the
+    // device) at 60fps to produce identical pixels. The compositor keeps
+    // presenting the last drawn frame, so skipping a draw leaves the image
+    // on screen untouched.
     function frame() {
-      if (rubDirty) { uploadRub(); rubDirty = false; }
-      for (var i = 0; i < layerCount; i++) {
-        gl.activeTexture(gl.TEXTURE0 + i);
-        gl.bindTexture(gl.TEXTURE_2D, layerTextures[i]);
+      if (rubDirty) { uploadRub(); rubDirty = false; needsDraw = true; }
+      if (needsDraw) {
+        needsDraw = false;
+        for (var i = 0; i < layerCount; i++) {
+          gl.activeTexture(gl.TEXTURE0 + i);
+          gl.bindTexture(gl.TEXTURE_2D, layerTextures[i]);
+        }
+        gl.activeTexture(gl.TEXTURE0 + layerCount);
+        gl.bindTexture(gl.TEXTURE_2D, rubTex);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
-      gl.activeTexture(gl.TEXTURE0 + layerCount);
-      gl.bindTexture(gl.TEXTURE_2D, rubTex);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
