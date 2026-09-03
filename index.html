@@ -174,18 +174,10 @@
   var CONFIG = {
     // Resolution (long edge, in px) of the internal rub (touch intensity) map.
     // Higher = finer detail on where growth appears, more memory/CPU per stamp.
-    // This whole map is re-uploaded to the GPU on every frame you're rubbing,
-    // so it's a direct per-frame bandwidth cost; it's only a soft mask, so
-    // dropping it costs almost nothing visually.
-    mapResolution: 384,
+    mapResolution: 512,
 
-    // Cap on devicePixelRatio used for the WebGL canvas. THE main performance
-    // lever: the shader samples every growth layer per pixel, so cost scales
-    // directly with pixel count (a cap of 1.5 rather than 2 is ~44% less
-    // fragment work). Raise toward 2 for sharpness, lower toward 1.25 for
-    // speed. The layer images are ~1280px tall, which pairs with ~1.5 on a
-    // phone-sized screen.
-    pixelRatioCap: 1.5,
+    // Cap on devicePixelRatio used for the WebGL canvas (perf safety on high-DPI phones).
+    pixelRatioCap: 2,
 
     brush: {
       // Brush radius as a fraction of the shorter map dimension.
@@ -250,17 +242,17 @@
       // Known photo dimensions, used to shape the desktop phone-frame
       // correctly from the moment this mode is chosen — before any of its
       // images have actually finished downloading.
-      width: 592, height: 1280
+      width: 853, height: 1844
     },
     discover: {
       layers: buildLayerList("discover", 6),
       music: "discover/bg.mp3",
-      width: 592, height: 1280
+      width: 670, height: 1448
     },
     deep: {
       layers: buildLayerList("deep", 6),
       music: "deep/bg.mp3",
-      width: 592, height: 1280
+      width: 853, height: 1844
     }
   };
 
@@ -288,12 +280,8 @@
     console.error(msg);
   }
 
-  // antialias is off deliberately: the scene is a single fullscreen quad, so
-  // there are no polygon edges for MSAA to smooth — it would only cost the
-  // extra multisample buffer and its resolve, which is expensive bandwidth on
-  // mobile tile-based GPUs (and Safari on iPhone felt it).
-  var gl = canvas.getContext('webgl', { antialias: false, alpha: false, preserveDrawingBuffer: false })
-        || canvas.getContext('experimental-webgl', { antialias: false, alpha: false });
+  var gl = canvas.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: false })
+        || canvas.getContext('experimental-webgl', { antialias: true, alpha: false });
 
   if (!gl) {
     fail("This browser doesn't support WebGL, which this piece needs to run.");
@@ -495,12 +483,6 @@
     for (var i = 0; i < layerCount; i++) {
       lines.push("  float w" + i + " = clamp(1.0 - abs(pos - " + i.toFixed(1) + "), 0.0, 1.0);");
     }
-    // Deliberately an unconditional sum, NOT guarded by each weight. Wrapping
-    // texture fetches in non-uniform branches looked like an easy win (only
-    // two layers ever have weight) but measured far SLOWER on device: the
-    // driver can no longer issue the fetches up front to hide memory latency,
-    // and divergent branches on mobile tile GPUs cost more than the fetches
-    // they skip. Straight-line sampling is what this hardware wants.
     var sumTerms = [];
     for (var i = 0; i < layerCount; i++) sumTerms.push("texture2D(uLayer" + i + ", uv).rgb * w" + i);
     lines.push("  vec3 col = " + sumTerms.join("\n           + ") + ";");
@@ -564,7 +546,6 @@
     rubCtx.fillStyle = 'rgba(0,0,0,1)';
     rubCtx.fillRect(0, 0, mapW, mapH);
     var rubDirty = true;
-    var needsDraw = true;
 
     // Lightweight shadow grid (independent of canvas) purely for cheap stage-crossing
     // lookups (haptics), avoiding any GPU/canvas readback on the hot path.
@@ -631,7 +612,6 @@
         canvas.width = w; canvas.height = h;
         gl.viewport(0, 0, w, h);
         gl.uniform2f(u.uScreenSize, cssW, cssH);
-        needsDraw = true;
       }
     }
     resize();
@@ -776,20 +756,8 @@
     var menuTimer = null;
     var menuArmedPointer = null;
 
-    /* ---------------- Audio ----------------
-       Both the looping music and the rustle SFX are plain HTMLMediaElements
-       (not the Web Audio API). A raw AudioContext was tried first for the
-       procedurally-generated rustle bursts, but its iOS unlock proved far
-       flakier in practice than a plain <audio>.play() call — confirmed by
-       on-device testing where the music (an <audio> element) started
-       reliably but the AudioContext-based rustle never did, even after the
-       exact same "unlock" gesture. Rather than continue chasing that,
-       rustle bursts are now three tiny pre-rendered noise-burst clips
-       (quiet by design, baked in at export time — iOS also ignores
-       HTMLMediaElement.volume, so runtime attenuation can't be relied on
-       anyway) played from a small pool of <audio> elements, cycled round-
-       robin so overlapping triggers don't cut each other off. */
-    var lastSoundTime = 0;
+    /* ---------------- Audio ---------------- */
+    var audioCtx = null, noiseBuffer = null, lastSoundTime = 0;
     var musicStarted = false;
     var muted = CONFIG.audio.startMuted;
     try {
@@ -804,57 +772,43 @@
       // volume while still actually muting on iPhone.
       bgAudio.muted = muted;
       bgAudio.volume = CONFIG.audio.musicVolume;
-      rustlePool.forEach(function (a) { a.muted = muted; });
       muteBtn.classList.toggle('muted', muted);
       muteBtn.setAttribute('aria-label', muted ? 'Unmute sound' : 'Mute sound');
     }
-
-    var RUSTLE_SOURCES = [
-      "data:audio/wav;base64,UklGRhYTAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YfISAAAAAA0A8f8cAO7/5f8oAPL/+v91/xwAHQDS/2UA0f/b/0//s/98/5n/zQAMAEIAmgHaAQUBAwDQ/iX+0gAuAID+7P8MAbEAqwE0/jf/af/O/SgAAQIpAQ3/TAFCANf/AAH8/eYAFAGWAQX+qwDN/WD8UQH+AkQDKQCk/TX7if+7ASADFP84/TAAiQJEBMj9af5CAmr/3f85+9z/uwPFA70DHAEo/M7/6fsHAVD7ZQHe/Mz94f0RAvr9Ef96+5n9dAD8/TYDzwHoBHoEEwG8BJYChAO5/WX+p/rxA2H9kPtC+c/74ANfBaX9dv6X/1cDXAE3AqwFfARP/oD9cfzn+BD6kvx0/lz/twOqCo8IuwaKBIkAAAQPAdb8C/WD+uL4Fvgj/24G8f+GBZkCwPqmBkAADvzABIH6YwIv+/r8NPtVBioB1AkABcADgv8O+qP6CwYX+wcHzwW3/HP/ZPum+qX9VfWW/aIKuf9NBTQAfvmRBqz3nvkJCrr+ZgcmBKoGuAIH+8MBxfPu+XH7A//E+ML5jQJ3AbkJCwebCmAHMAIX+c0B9fgJ83YGGQOMBl8BHQEo9MD0cwF6A5r6tgkP/J//5/g4BOn93Pg+9q35RfxeBeMFRRBaEYoL5gSQBfwGRPIe7/n1JfR5AFv9v/yR/Q763geVCbgHQvnX/W8Frfvo/f/2Tve/+1oCagXqDnsDXfhFB6r6rvcLC54L3ABd+B/8CP2VCYwCPPhVCBUGN/ma9bT9v/j4AwYHLPqHB6oK7gxSBnUDRPYC8DXxtweLB+kMrP/nA6X1ZfQ3+M4A6AMeA7QADgMBDCMCnAb/9eD43/6BAkf7t/zICVwGuwKW9T3ytfYn+H4MPvwB/2T5NAWS+075zfks/+kH0w4iA9H+WQnrCfX6VAW/CDz60/9l+Pf3lf7KAbQBxQKD+wsG3P03CRcDxfv69oT92v27A4ECifdwBpX5DAdsCm8MfQUT94L5Wfv5AFD95gIT+iP7dAC//9T4AwqMCMoJP/5NB3oG1Qga90/48/cZ/pv4hPQh/TwEfwBXDNsBfPs2BT0ALfo3+XUI5QyEBfD5QQCc9yf4af7P/db8rgpI/HcBc/Yv9Qn5rwziC9YMLPkZAXX+Pf2mA5T8Gf+X+rP8FwE++k37lv9VAiMK4gcQBNAIWfoE9AH6dPcWAcAEmfvcBRoFGAFaCq4KKvsv9TQFdPl2A7r85/t7ADkKzPcF9jcDRQDV/O8K5v6oBHsLrwfxA0kCIwM39yb8YwIeBuAGBQYN82/0gvi1BPP9d/hO8iv4Twap+VH5df0xBDoClwx7/6cCHwgiDGwK9fcKAZAB7/vb8Zzz9wJe+QH8UfzKBykC1vkO/ur+9gc5AdQGWQRzCpgHOv7Z/I78yQUP+LD65v5p/gkC1QBo/skDQ/10AWYF0/jD+akIGA0yDUj22ADhBjgHGAIT/xv/E/xNAHn7ZfTN8MoDnQbk+XsEF/wSAYz8Wvg19+P1FffM+AH77QxaCkD/GwSVBTgEsvyJ/zYKtwENAQQKUvzTAmb/7wS+/Ff+WfvzBd8JgANYCEoDIQP9A/z1QgIx+V/5hPN5AZb76wGJ+Xr6aPxr+in2VgYVD+3/HvnW+6T36gOCAawEnQx+DM0L/QkuALr6Ze9i70L7jAdyAZ71m/esBZf8yfra/DIFWgxm/zkDjgILAB4CqQdU+839QvY5/nMHIw7QAmP6ev6d+671JP5+B60LPg1P/q/2VfIU+u0FqPxgBwUHkPpuAJcGPgoB+W8CaQS7+NL2IwaT/Ur5SAI++JL9HP17AR0EOAU6AGUI3QjICd39LQBn+uH1D/6/B+AGFPou9RMBsgOJB/b3YAOA/Uv4LvncCD8MXfiL93cBwPUw83303Aj/AhoAegnnAOwG4P/M+/n8Dvm09tII2Q2BBHUFxAg0/sMBswPy9LvyegGJBa/6uwU2CIX9Qfry9Cb89Pc/ASgGAQbM+X0CEwhk+4kBagjP+8YHHQwKBnAGYvgy/RgFwPOIADD41AK0AroFHP2Q+yAGMvbp8/AGVwtK+kEHMftnBXsI5PRT7+/2WwgzClwAJAdZ/PD5lfbEB0IJ1gBY+SEHbv569wn7jwMtB874MAc8BUT2eQOaCogIQvQK+WX+IQepAOb0QQWtCrMAhfMHAsIECAoo9c/46vcA9XkDc/909wb4QQhcCH/+xgUK++gDEAac9+L+YAbCCBIHSwnLBUYHhPun7zbxcvZr9Pn2VAIsABkAFAqLDgMO0QBrA/IGtPen9C7/q/pL+IH81faI/x/6dP1z/oEB4f2DBO8K1wOgDX8NKf9M9EcCUfuX+88B+AyO/4r+5QEGBM35i/+KAFMD2/dJ9bcI5goaCpEKpglY++L+2/0H/KH+3fenAhj8rfTL8Jv/AfxECzr+gfweC2MEIQp/B9L2b/Qq+cgGkf6x/lX/PPzeBVD4b/jWBlIG2AIH/lv3g/3BC2EGDAN3CioJwgluByX/W/Ru+SD2qQCH9Vj6RAXb/ykBZ/Ys+L4IwQaQ/jP/OAXUBjgHZfqQ9Ub+N/+AADD57vmtBCL/Dgb19w0IOPyF/k0JB/2J+MMIZAteAnD0NP0L+dX3ZAglBosAI/a3+uoHKP+Z/GYCYvxsAZgHJv4a/9IB5/3P+ff2HgGXDOT6oAcODeQDKAnwAwf+e/ok+pH//ffWABL/gQIGCdX6M/oq+O/zcQD6BLENLgYu/lAGdfUw97IC5/nx+5wH7/8P+74H7vlZBmf+j/m6/q0AWgvuCIgAiP82+hkHIP6jBaUCkwZC+0H5n/gQA+wI8QZp/TsCjgG1/JD0lfQAAKv52/8bB3sFIAOR+or1ovMp9Tb7zAS4BHf/r/8MA6YKxQgy+uD+t/qlB6sLkAT9BFkD3gTD+cj1aQBvCET7H/73/v/7IwPG+Aj7z/2bCesGZwXICVz6RP3Y9LH0DAHhB0sFawIzBagI6gcWBJ/6tP7W9YMBIPkHBR37m/cZ+ab9DPry+jwImgz6/Hn9of0JBs8Esf4hBNgBCflVAu7+EAZaA+P3zgB3AIL/4/wjAej2L/0vCML84vev/AIBqP9IAVEFLgi7+eD70wE++MAHLwavAR3/nfjs9TcC3Qq+CTX5tfTY/ZYCfwSOCUMKngq7/NT60wQhAsb0vwGeADX4UPkP/6gCA/8UBE8BVQhFB674wvPYAQcCmAiX/7L3kPOMAav5LQJkA4YGXgoe/Vv9ygI7+hH2/vY+B00J1P229vYAuf5r/KX7AAFmAPUKOAaXCbkJyweg/hr9Ivwl858Ccvlt/sUCvQWGAYIBoQS7AdcAugND9uv6ovRn9l72vQYBAmQDDwi2Bl4JIQHDAZ8EhveR+s318v3n/EIGFwLu+pgFswDB9zX6/v1y+df63/4zAZMDbwHXAPECUwFpB/MI7fo2+aL46P0tALUH1gh3CvsF8AEBB7ABOPs5+MzzmgNrBdX+HQWmBLX+FwV+BTv9Zvqh9bz0fPoC+4j5OAVbDFwITAmLB/oBn/2x+ZL7DPr39939DgMrAz0Ff/7E9vz4KPw9AlwBPwWs/osAevk2Ax0JrAmaCMX7rwQbAH/4bPWs9ZcAQwR3B1kFfgEd+qYBSPi/AKz7cPrnBpoK7Aag/Fj9DPyN+GP6EvlJCKwAQADU/bwD2AOABnf6G/okAR8DQAfY+wP9av7hABb/mgT2+9T4zvw5+yUAyAT6/bcBRASmBMD7xgRyBnL/u/8EBGAGKv1jAor+iAUBBjz9kvpp/OYEq/oM/hEBFANe+Qz/9v5p/dcGBvzqARb83QWqATP/XPsE/3EF+/rVAB/7CPswBVD8kgON+x4AbQP8/OMEUf4CACH9SwSa/vT8Kfn3Bdj8OP7fA6gASgNOALsGbf12+BH5jgAiBEUIMQo9AfkDQ/4A/GP46wKL/q4BrAAZB6L93/7mAlH7YgK/AI/5VQST/9n+KAPBBsj8LvhhAEoCXP8/AeYFMAVFAEAD3AN7AUX3M/v//RoDYf99/wgBqPhy9s/2c/l7/XX8NgT7BQ4El/x5AZn97vqcBRkKp/7JApH75AA3AwgD9wdcAyH7VAMr/ar+9/0TA7L6WvyI/pwBnAY+/1L9agF7/En/3v28AUUCfwP+/yf8f/gfANz9f/oI/3v/FAU7AZMA6QQHBZX92wBkBg0HZAWY/MQCtPpH+4T4if7uApYDhPqoBOz+kQLUBTMEr/9R/hL5U/t0AtICSAL0AVb9EQS2/e75mP9o+78EUgJl+3H4zP97+8n61/8cAk8HWP+/BWUBJwUI/VT51v0U/X0A0gWaB0b9Gfzh/BD89P9T/Fv9i/yJAesIowBvBpoAngNEBSwCGAKxAKYDUAIz/Uf6jPhU/Rn8WPyrBL4EIQJwBNIA3f2PAIkAwfsC/JD/6PyUBHH8xQP9Bs4CNPxbAbv+HgFO/TX7ogP9+7L5KQLCBKP/lf4AAuYBHgJy/78Ee/yN/+v7uPwa/Z8DnwIR/zsAyf+UAFz9Jv6p/xf8rPpqAVT/QQX6/eL9pgJ4/mIAq/8k/7n+2AaFATH9vQR8/r8C/gI+A2sDkPwf+TX9Qv/h/dgD4/08AF0BCvxEA4gAhwBP/Rn/cABsAsz8aP8TAVkGfwPdAqL/GP8eBGH/xgPFAL8Chf/2AFQBxvwV+38BUf3hANj74P3O/Rj96/yxBLoDvQClAD8D+AG2+/v6TwI7AfoAfPwu+0X8U/6gAbUARgM/ASQBNwXw/EgAZgJb/ZkC4/z/AYr9mf7m/uIADQJv/G0CagGUBNT9ZP61A/gB1P+//sMCMPuEAtf/NQKH/90Bl/sc/VEBtwSwABP7FgDxAH/8Bfwr/1f9/QNoBhMEbwP+/VT6k/8YAsQBsfwN+s/+Df0x/oMAPv//BM4AUQH0BMgCDP8cAbz85/p8+rsAwQInA9ECdgHfA+7/nvvg+/390QCB/8n/s/49AiYE2v9GAqb9+gIp/4MAagDu+zj/+/sm/9cAxwQB//77XAA7//AA9/4CAiH+NwAOA5IEx//o/0IDUf08AaUBawOo/xr+k/5+/RT7FP85/1AAMgIYAID9QAJ8BPz+IwCz/u4Ahvw/AmwDvv35/17+IP0MAsACNwHOAHACm/6d/tb8Zv4T/WP+WgFw/6sBRwMUAiAA1P4v/P4A8wMa/98ArAAKAkABN/3F+2b9S/20ABb+sgGCAz/+uAJnA439df+F/Dj/f/3HAE7+yP0jBJsEGAPdAlb+OPyV/XwBmgJTAsz/jv8fAXUAqf25/nUCkwNw/fL7pPs6/0EDnAGP/4sC9v7k/3QC4wK5/WL9Wf5VAaABfwD7/gb+5/8CAor/Tf5g/Oj8uf1HAFIDiAEH/23+YgOHAs7/RwJvA9EALv9S/jX+cwFyAW4CDP0z/OL+YwDs/0oArQITAYv+Sv93/mMAwQB6ARADWgCk/IX+gP+RAdgCbf5GAf79if/Q/CMBCACI/lkCff7a/s7/C/9z/2ECdf9+AOP+ugA//zL/dABX/6IBd/8UAvIBhv6i/6r95v0Q/7YB6QE5AfT+6v4ZAa8Aj//r/Yz9UQIKAdsCvf9vAOz+twEg//X/XQKqAUcAzf5J//v8Q/2H/hP+J/+OABQDyAMd/7P/BQGoAc/+RP1L/jz/Gf9Z/5gBGABm/6D/nACw/8QACAPVAv4BPQLgAc3/t/85/sz+4QCq/+j+2f9e/7H9sf41/qkB4QFfADj+6v3F/l0AIf/m/27/Cv8f/0r/XwJuAGb/CQIsAykC0P4P/iX+SP4cABT/vwHrAKX/2v6WAOkBVAGZ/zABegBpAIgB0QBc/uP/9f6gAEkACgCB/sj9SQHy/lz+3P8aAisBOwJKARwB3gARAQ4Bsv5d/wb/pADR/+r+jf3C/zn+CwBv/6MA/AETAA4ACQDH/lcAuwD3AC//Nf4n/8f+U//X/gMATgBBAF8AVv88ACgBVgCyAGQBngBlAQABGQBv/iz/XP7hACL/GP8p/yYBywE/ATIBa/+MAMr+5/6JAJgAJAHvABv/H/+wAGwAfACx/mIA8//Z/qb/ywAzAAIB+gDR/4MAOQDt/kn+Lv6I/5gAg/9d/xQBJwH3/9wADwBO/1f/T/9FAOv/NgBeACIA7v+t/2j/JP9WAGr/hwDfAPIAhQDZAM7/m/9N/9H+lf8FAB0AaP92/8H/HwDm/xcABQC2/9oAswAcAX4ANwC2/zoA4P9KAOL/JAAaALT/Mf9X/8f/AgDA/8P/4v86AL3/AABuALIASgCdAGAASwB6/7H/Tf/4/9b/ZwDB/4P/1f+9/yEAIQC5/9X/0f/d/58AbAB1AA8Av//O/yUABACp/wEAFwA6AMb/QAAVAPP/3f82AO//3/84AA8Aw/+9/xwAAADz//D/QgAaADYAKwAfABQA4P8EAPL/1P/Y//f///8kABEACADj/97/7//+/xcA+f8IAAcA/P8JAAAABAD+/wAAAAAAAA==",
-      "data:audio/wav;base64,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",
-      "data:audio/wav;base64,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"
-    ];
-    // A handful of pooled elements per clip so quick repeated triggers
-    // overlap naturally instead of a single element cutting itself off.
-    // One element per clip. Three is enough to overlap (bursts are ~0.1s and
-    // throttled to 85ms apart) while keeping the number of elements that
-    // need individually unlocking as low as possible.
-    var rustlePool = RUSTLE_SOURCES.map(function (src) {
-      var a = new Audio(src);
-      a.preload = 'auto';
-      a.volume = CONFIG.audio.rustleVolume; // honored on desktop/Android; iOS ignores this, hence the quiet bake
-      return a;
-    });
-    var rustlePoolIndex = 0;
     applyMuteState();
 
-    // THE iOS GOTCHA THIS WHOLE SYSTEM EXISTS AROUND:
-    // Per spec, only keydown/mousedown/pointerdown/pointerup/touchend grant
-    // "user activation" — pointermove does NOT, and WebKit enforces that far
-    // more strictly than Chrome. Rustle bursts are triggered from
-    // pointermove (while dragging), so their play() calls can never rely on
-    // being inside a gesture. And each <audio> element must be individually
-    // unlocked by a play() during a real gesture — unlocking one does not
-    // unlock its siblings. Hence: unlock every pooled element from the
-    // handlers that DO grant activation (pointerdown / pointerup / the mute
-    // button's click). To keep that inaudible, each element is seeked to the
-    // last few ms of its own fade-out tail before playing, so a real,
-    // uninterrupted play() happens without anything being heard.
-    var rustleUnlocked = false;
-    function unlockRustlePool() {
-      if (rustleUnlocked) return;
-      var allReady = true;
-      rustlePool.forEach(function (a) {
-        // Needs metadata for the tail seek; if it isn't ready yet, leave the
-        // flag clear so the next gesture retries rather than half-unlocking.
-        if (!a.duration || !isFinite(a.duration)) { allReady = false; return; }
-        try { a.currentTime = Math.max(0, a.duration - 0.005); } catch (e) { allReady = false; return; }
-        var p = a.play();
-        if (p && p.catch) p.catch(function () { rustleUnlocked = false; });
-      });
-      if (allReady) rustleUnlocked = true;
+    function initAudio() {
+      if (audioCtx || !CONFIG.audio.enabled) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AC();
+        var seconds = 1.0;
+        noiseBuffer = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * seconds), audioCtx.sampleRate);
+        var d = noiseBuffer.getChannelData(0);
+        for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        // iOS often needs an audible-graph node actually started inside the
+        // unlocking gesture (a bare resume() call isn't always enough) —
+        // a near-silent one-sample blip reliably finishes waking the
+        // hardware so the very next scheduled sound is actually heard.
+        var kick = audioCtx.createBufferSource();
+        kick.buffer = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+        kick.connect(audioCtx.destination);
+        kick.start(0);
+      } catch (e) { audioCtx = null; }
     }
+
+    // Both the ambient rustle SFX and the background track require a user
+    // gesture to start on mobile browsers; this is called from the first
+    // canvas touch AND from the mute button itself (a tap on the button is
+    // just as valid a gesture, so it can unlock+start audio on its own).
+    // resume() is called unconditionally (not gated on checking .state
+    // first) and retried on every touch, not just the first — iOS has been
+    // observed leaving the context "suspended" after a resume() call that
+    // silently didn't take, and checking state before resuming just means
+    // that stale reading skips retrying it.
     function ensureAudioStarted() {
+      initAudio();
+      if (audioCtx) audioCtx.resume();
       // bgAudio.src is empty when this mode has no background track — leave
       // it untouched rather than attempting to play a nonexistent source.
       if (!musicStarted && bgAudio.src) {
@@ -869,7 +823,6 @@
       try { localStorage.setItem('reclaim_muted', muted ? '1' : '0'); } catch (e) {}
       applyMuteState();
       ensureAudioStarted();
-      unlockRustlePool(); // a click grants activation — take the opportunity
     }
     muteBtn.addEventListener('click', function (e) {
       e.preventDefault();
@@ -878,13 +831,22 @@
     });
 
     function playRustle() {
-      if (muted || !CONFIG.brush.sound) return;
-      var a = rustlePool[rustlePoolIndex];
-      rustlePoolIndex = (rustlePoolIndex + 1) % rustlePool.length;
-      try { a.currentTime = 0; } catch (e) {}
-      a.playbackRate = 0.85 + Math.random() * 0.35;
-      var p = a.play();
-      if (p && p.catch) p.catch(function () {});
+      if (muted || !CONFIG.brush.sound || !audioCtx || !noiseBuffer) return;
+      var now = audioCtx.currentTime;
+      var src = audioCtx.createBufferSource();
+      src.buffer = noiseBuffer;
+      var bp = audioCtx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 700 + Math.random() * 1600;
+      bp.Q.value = 0.6 + Math.random() * 0.8;
+      var g = audioCtx.createGain();
+      var dur = 0.08 + Math.random() * 0.09;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(CONFIG.audio.rustleVolume * (0.6 + Math.random() * 0.5), now + dur * 0.35);
+      g.gain.linearRampToValueAtTime(0, now + dur);
+      src.connect(bp); bp.connect(g); g.connect(audioCtx.destination);
+      src.start(now);
+      src.stop(now + dur + 0.02);
     }
 
     /* ---------------- Stage-crossing haptics (fires as each new layer becomes the dominant one) ---------------- */
@@ -930,7 +892,6 @@
       activePointers.set(e.pointerId, true);
       lastPt = null;
       ensureAudioStarted();
-      unlockRustlePool(); // pointerdown grants activation; pointermove won't
       var uv = screenToImageUV(e.clientX, e.clientY);
       handleStroke(uv.x, uv.y);
       checkStageCrossing(uv.x, uv.y);
@@ -956,6 +917,10 @@
       var uv = screenToImageUV(e.clientX, e.clientY);
       handleStroke(uv.x, uv.y);
       checkStageCrossing(uv.x, uv.y);
+      // Safety net: if the pointerdown's unlock attempt didn't fully take
+      // (observed on iOS), keep retrying cheaply through the same
+      // continuous drag rather than staying silent until the next touch.
+      if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
       var now = performance.now();
       if (now - lastSoundTime > 85) {
         playRustle();
@@ -970,9 +935,6 @@
       if (menuArmedPointer === e.pointerId) {
         clearTimeout(menuTimer); menuTimer = null; menuArmedPointer = null;
       }
-      // pointerup also grants activation — retry here in case metadata
-      // wasn't loaded yet when pointerdown fired.
-      unlockRustlePool();
       activePointers.delete(e.pointerId);
       lastPt = null;
     }
@@ -986,24 +948,15 @@
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
     /* ---------------- Render loop ---------------- */
-    // Render on demand. Nothing in the scene animates on its own — it only
-    // changes while a finger is actually moving — so redrawing every frame
-    // was burning GPU time (and battery, and heat, which throttles the
-    // device) at 60fps to produce identical pixels. The compositor keeps
-    // presenting the last drawn frame, so skipping a draw leaves the image
-    // on screen untouched.
     function frame() {
-      if (rubDirty) { uploadRub(); rubDirty = false; needsDraw = true; }
-      if (needsDraw) {
-        needsDraw = false;
-        for (var i = 0; i < layerCount; i++) {
-          gl.activeTexture(gl.TEXTURE0 + i);
-          gl.bindTexture(gl.TEXTURE_2D, layerTextures[i]);
-        }
-        gl.activeTexture(gl.TEXTURE0 + layerCount);
-        gl.bindTexture(gl.TEXTURE_2D, rubTex);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (rubDirty) { uploadRub(); rubDirty = false; }
+      for (var i = 0; i < layerCount; i++) {
+        gl.activeTexture(gl.TEXTURE0 + i);
+        gl.bindTexture(gl.TEXTURE_2D, layerTextures[i]);
       }
+      gl.activeTexture(gl.TEXTURE0 + layerCount);
+      gl.bindTexture(gl.TEXTURE_2D, rubTex);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
@@ -1022,8 +975,7 @@
       CONFIG: CONFIG, reset: doReset, rubGrid: rubGrid, gl: gl,
       rubCanvas: rubCanvas, mapW: mapW, mapH: mapH, gridW: gridW, gridH: gridH,
       screenToImageUV: screenToImageUV, bgAudio: bgAudio,
-      toggleMute: toggleMute, isMuted: function () { return muted; },
-      rustlePool: rustlePool
+      toggleMute: toggleMute, isMuted: function () { return muted; }
     };
   }
 })();
